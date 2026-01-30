@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+python-pptx
+python-dotenv
+openai
+qrcode
+pillow
