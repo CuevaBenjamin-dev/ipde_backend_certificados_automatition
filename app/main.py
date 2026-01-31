@@ -404,10 +404,36 @@ def _replace_rids_in_element(el, rid_map: dict[str, str]):
             if attr_val in rid_map:
                 e.attrib[attr_key] = rid_map[attr_val]
 
+# VAMOS A VER SI ESTO TAMPOCO NO ROMPE NADA
+# def clone_slide_into(dest_prs: Presentation, src_slide):
+#     blank_layout = dest_prs.slide_layouts[6]
+#     new_slide = dest_prs.slides.add_slide(blank_layout)
+
+#     spTree = new_slide.shapes._spTree
+#     src_spTree = src_slide.shapes._spTree
+
+#     for child in list(src_spTree):
+#         tag = child.tag.lower()
+#         if tag.endswith("nvgrpsppr") or tag.endswith("grpsppr"):
+#             continue
+#         spTree.insert_element_before(deepcopy(child), 'p:extLst')
+
+#     rid_map = {}
+#     for rId, rel in src_slide.part.rels.items():
+#         try:
+#             new_rId = new_slide.part.relate_to(
+#                 rel._target, rel.reltype, is_external=rel.is_external
+#             )
+#             rid_map[rId] = new_rId
+#         except Exception:
+#             continue
+
+#     _replace_rids_in_element(new_slide._element, rid_map)
 
 def clone_slide_into(dest_prs: Presentation, src_slide):
-    blank_layout = dest_prs.slide_layouts[6]
-    new_slide = dest_prs.slides.add_slide(blank_layout)
+    # ✅ Usar el MISMO layout del slide original
+    layout = src_slide.slide_layout
+    new_slide = dest_prs.slides.add_slide(layout)
 
     spTree = new_slide.shapes._spTree
     src_spTree = src_slide.shapes._spTree
@@ -430,22 +456,40 @@ def clone_slide_into(dest_prs: Presentation, src_slide):
 
     _replace_rids_in_element(new_slide._element, rid_map)
 
+
+# CAMBIO REALIZADO ESPEREMOS NO ROMPA NADA
+
+# def merge_presentations(presentations: List[Presentation]) -> Presentation:
+#     if not presentations:
+#         raise ValueError("No hay presentaciones para unir")
+
+#     # ✅ CREAR PRESENTACIÓN NUEVA (NO reutilizar ninguna)
+#     dest = Presentation()
+
+#     # Igualar tamaño de diapositiva
+#     dest.slide_width = presentations[0].slide_width
+#     dest.slide_height = presentations[0].slide_height
+
+#     for prs in presentations:
+#         for slide in prs.slides:
+#             clone_slide_into(dest, slide)
+
+#     return dest
+
 def merge_presentations(presentations: List[Presentation]) -> Presentation:
     if not presentations:
         raise ValueError("No hay presentaciones para unir")
 
-    # ✅ CREAR PRESENTACIÓN NUEVA (NO reutilizar ninguna)
-    dest = Presentation()
+    # 🔒 Usar la primera presentación como base (PRESERVA TEMA Y COLORES)
+    dest = presentations[0]
 
-    # Igualar tamaño de diapositiva
-    dest.slide_width = presentations[0].slide_width
-    dest.slide_height = presentations[0].slide_height
-
-    for prs in presentations:
+    for prs in presentations[1:]:
         for slide in prs.slides:
             clone_slide_into(dest, slide)
 
     return dest
+
+
 
 
 
