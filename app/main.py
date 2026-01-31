@@ -405,9 +405,11 @@ def _replace_rids_in_element(el, rid_map: dict[str, str]):
                 e.attrib[attr_key] = rid_map[attr_val]
 
 # VAMOS A VER SI ESTO TAMPOCO NO ROMPE NADA
+
 # def clone_slide_into(dest_prs: Presentation, src_slide):
-#     blank_layout = dest_prs.slide_layouts[6]
-#     new_slide = dest_prs.slides.add_slide(blank_layout)
+#     # ✅ Usar el MISMO layout del slide original
+#     layout = src_slide.slide_layout
+#     new_slide = dest_prs.slides.add_slide(layout)
 
 #     spTree = new_slide.shapes._spTree
 #     src_spTree = src_slide.shapes._spTree
@@ -431,30 +433,37 @@ def _replace_rids_in_element(el, rid_map: dict[str, str]):
 #     _replace_rids_in_element(new_slide._element, rid_map)
 
 def clone_slide_into(dest_prs: Presentation, src_slide):
-    # ✅ Usar el MISMO layout del slide original
-    layout = src_slide.slide_layout
-    new_slide = dest_prs.slides.add_slide(layout)
+    # ✅ USAR LAYOUT EN BLANCO (evita placeholders duplicados)
+    blank_layout = dest_prs.slide_layouts[6]
+    new_slide = dest_prs.slides.add_slide(blank_layout)
 
     spTree = new_slide.shapes._spTree
     src_spTree = src_slide.shapes._spTree
 
     for child in list(src_spTree):
         tag = child.tag.lower()
+
+        # ❌ NO copiar propiedades internas del layout
         if tag.endswith("nvgrpsppr") or tag.endswith("grpsppr"):
             continue
+
         spTree.insert_element_before(deepcopy(child), 'p:extLst')
 
+    # 🔁 Copiar relaciones (imágenes, fondos, etc.)
     rid_map = {}
     for rId, rel in src_slide.part.rels.items():
         try:
             new_rId = new_slide.part.relate_to(
-                rel._target, rel.reltype, is_external=rel.is_external
+                rel._target,
+                rel.reltype,
+                is_external=rel.is_external
             )
             rid_map[rId] = new_rId
         except Exception:
             continue
 
     _replace_rids_in_element(new_slide._element, rid_map)
+
 
 
 # CAMBIO REALIZADO ESPEREMOS NO ROMPA NADA
