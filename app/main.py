@@ -91,9 +91,81 @@ def format_date_long_es(date_str: str) -> str:
             "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
             "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
         ]
-        return f"{date_obj.day} de {meses[date_obj.month - 1]} del {date_obj.year}"
+
+        # ✅ día con cero a la izquierda
+        dia = f"{date_obj.day:02d}"
+
+        return f"{dia} de {meses[date_obj.month - 1]} del {date_obj.year}"
     except ValueError:
         return date_str
+
+def format_date_range_long_es(fecha_inicio: str, fecha_fin: str) -> tuple[str, str]:
+    """
+    Devuelve (fecha_inicio_formateada, fecha_fin_formateada)
+    aplicando la regla:
+    - Si ambos años son iguales → el año solo se muestra en la fecha final
+    - Si son distintos → cada fecha muestra su año
+    """
+    try:
+        inicio = datetime.strptime(fecha_inicio, "%Y-%m-%d")
+        fin = datetime.strptime(fecha_fin, "%Y-%m-%d")
+
+        meses = [
+            "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+            "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
+        ]
+
+        dia_inicio = f"{inicio.day:02d}"
+        dia_fin = f"{fin.day:02d}"
+
+        if inicio.year == fin.year:
+            fecha_inicio_str = f"{dia_inicio} de {meses[inicio.month - 1]}"
+            fecha_fin_str = f"{dia_fin} de {meses[fin.month - 1]} del {fin.year}"
+        else:
+            fecha_inicio_str = f"{dia_inicio} de {meses[inicio.month - 1]} del {inicio.year}"
+            fecha_fin_str = f"{dia_fin} de {meses[fin.month - 1]} del {fin.year}"
+
+        return fecha_inicio_str, fecha_fin_str
+
+    except ValueError:
+        # fallback seguro
+        return format_date_long_es(fecha_inicio), format_date_long_es(fecha_fin)
+
+
+def format_two_digits_number(value: int) -> str:
+    """
+    Formatea números enteros a dos dígitos.
+    Ej: 3 -> 03, 12 -> 12
+    """
+    try:
+        return f"{int(value):02d}"
+    except (ValueError, TypeError):
+        return str(value)
+
+
+def format_two_digits_float(value: float) -> str:
+    """
+    Formatea números decimales manteniendo decimales,
+    pero con parte entera a dos dígitos.
+    Ej: 3 -> 03
+        3.5 -> 03.5
+        12 -> 12
+        12.25 -> 12.25
+    """
+    try:
+        entero = int(value)
+        decimal = value - entero
+
+        if decimal == 0:
+            return f"{entero:02d}"
+
+        # Eliminar ceros innecesarios en decimales
+        decimal_str = str(round(decimal, 2)).lstrip("0")
+        return f"{entero:02d}{decimal_str}"
+    except (ValueError, TypeError):
+        return str(value)
+
+
 
 
 def nombre_completo_capitalizado(nombres: str, apellidos: str) -> str:
@@ -209,11 +281,6 @@ def distribuir_horas_por_modulo(total_horas: int, cantidad_modulos: int) -> List
     if cantidad_modulos <= 0:
         return []
 
-    # # Pesos progresivos: 1,2,3,...n
-    # pesos = list(range(1, cantidad_modulos + 1))
-    # suma_pesos = sum(pesos)
-    
-    # Pesos progresivos pero parecidos entre sí, y no tan alejados de cantidad, por ejemplo 1.1,1.1,1.2,1.25,1.3,1.35,1.4,1.5
     pesos = []
     incremento = 0.1
     for i in range(cantidad_modulos):
@@ -221,14 +288,6 @@ def distribuir_horas_por_modulo(total_horas: int, cantidad_modulos: int) -> List
         pesos.append(peso)
     suma_pesos = sum(pesos)
     
-    
-    # pesos = []
-    # for i in range(cantidad_modulos):
-    #     peso = (i // (cantidad_modulos // 3 + 1)) + 1
-    #     pesos.append(peso)
-    # suma_pesos = sum(pesos)
-
-    # Cálculo inicial
     horas = [
         int((peso / suma_pesos) * total_horas)
         for peso in pesos
@@ -404,33 +463,6 @@ def _replace_rids_in_element(el, rid_map: dict[str, str]):
             if attr_val in rid_map:
                 e.attrib[attr_key] = rid_map[attr_val]
 
-# VAMOS A VER SI ESTO TAMPOCO NO ROMPE NADA
-
-# def clone_slide_into(dest_prs: Presentation, src_slide):
-#     # ✅ Usar el MISMO layout del slide original
-#     layout = src_slide.slide_layout
-#     new_slide = dest_prs.slides.add_slide(layout)
-
-#     spTree = new_slide.shapes._spTree
-#     src_spTree = src_slide.shapes._spTree
-
-#     for child in list(src_spTree):
-#         tag = child.tag.lower()
-#         if tag.endswith("nvgrpsppr") or tag.endswith("grpsppr"):
-#             continue
-#         spTree.insert_element_before(deepcopy(child), 'p:extLst')
-
-#     rid_map = {}
-#     for rId, rel in src_slide.part.rels.items():
-#         try:
-#             new_rId = new_slide.part.relate_to(
-#                 rel._target, rel.reltype, is_external=rel.is_external
-#             )
-#             rid_map[rId] = new_rId
-#         except Exception:
-#             continue
-
-#     _replace_rids_in_element(new_slide._element, rid_map)
 
 def clone_slide_into(dest_prs: Presentation, src_slide):
     # ✅ USAR LAYOUT EN BLANCO (evita placeholders duplicados)
@@ -465,26 +497,6 @@ def clone_slide_into(dest_prs: Presentation, src_slide):
     _replace_rids_in_element(new_slide._element, rid_map)
 
 
-
-# CAMBIO REALIZADO ESPEREMOS NO ROMPA NADA
-
-# def merge_presentations(presentations: List[Presentation]) -> Presentation:
-#     if not presentations:
-#         raise ValueError("No hay presentaciones para unir")
-
-#     # ✅ CREAR PRESENTACIÓN NUEVA (NO reutilizar ninguna)
-#     dest = Presentation()
-
-#     # Igualar tamaño de diapositiva
-#     dest.slide_width = presentations[0].slide_width
-#     dest.slide_height = presentations[0].slide_height
-
-#     for prs in presentations:
-#         for slide in prs.slides:
-#             clone_slide_into(dest, slide)
-
-#     return dest
-
 def merge_presentations(presentations: List[Presentation]) -> Presentation:
     if not presentations:
         raise ValueError("No hay presentaciones para unir")
@@ -497,9 +509,6 @@ def merge_presentations(presentations: List[Presentation]) -> Presentation:
             clone_slide_into(dest, slide)
 
     return dest
-
-
-
 
 
 # -------------------------------------------------
@@ -524,8 +533,10 @@ def generar_presentacion_por_item(item: DiplomaRequest) -> Presentation:
     usar_fecha_larga = modelo_cert in MODELOS_FECHA_LARGA
 
     if usar_fecha_larga:
-        fecha_inicio = format_date_long_es(item.fechaInicio)
-        fecha_fin = format_date_long_es(item.fechaFin)
+        fecha_inicio, fecha_fin = format_date_range_long_es(
+            item.fechaInicio,
+            item.fechaFin
+        )
         fecha_emision_larga = format_date_long_es(item.fechaEmision)
         fecha_emision_corta = format_date_ddmmyyyy(item.fechaEmision)
         # fecha_emision = format_date_long_es(item.fechaEmision)
@@ -559,8 +570,8 @@ def generar_presentacion_por_item(item: DiplomaRequest) -> Presentation:
         "{{FECHA_INICIO}}": fecha_inicio,
         "{{FECHA_FIN}}": fecha_fin,
 
-        "{{HORAS_ACADEMICAS}}": str(item.horasAcademicas),
-        "{{CREDITOS_ACADEMICOS}}": str(item.creditosAcademicos),
+        "{{HORAS_ACADEMICAS}}": format_two_digits_number(item.horasAcademicas),
+        "{{CREDITOS_ACADEMICOS}}": format_two_digits_float(item.creditosAcademicos),
 
         "{{FOLIO_NUMERO}}": item.folioNumero,
 
