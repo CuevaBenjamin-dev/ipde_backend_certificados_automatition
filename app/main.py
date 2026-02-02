@@ -54,6 +54,8 @@ TEMPLATE_FILENAME_MAP = {
     "DIPLOMADO": "plantilla_diplomado.pptx",
     "PROGRAMA DE ESPECIALIZACIÓN": "plantilla_programa_de_especializacion.pptx",
     "CURSO": "plantilla_curso.pptx",
+    "CURSO_DE_CAPACITACION": "plantilla_curso_de_capacitacion.pptx",
+    "CURSO_DE_ACTUALIZACION": "plantilla_curso_de_actualizacion.pptx",
 }
 
 # Nº de módulos por tipo
@@ -61,6 +63,8 @@ MODULOS_COUNT = {
     "DIPLOMADO": 8,
     "PROGRAMA DE ESPECIALIZACIÓN": 8,
     "CURSO": 5,
+    "CURSO_DE_CAPACITACION": 5,
+    "CURSO_DE_ACTUALIZACION": 5,
 }
 
 # Cache en memoria: (tipo, tema) -> módulos
@@ -166,6 +170,23 @@ def format_two_digits_float(value: float) -> str:
         return str(value)
 
 
+def calcular_horas_por_modulo(total_horas: int, cantidad_modulos: int) -> str:
+    """
+    Calcula horas por módulo:
+    total_horas / cantidad_modulos
+    Devuelve string sin decimales si es entero, o con 2 decimales si no.
+    """
+    if cantidad_modulos <= 0:
+        return "0"
+
+    valor = total_horas / cantidad_modulos
+
+    # Si es entero, no mostrar decimales
+    if valor.is_integer():
+        return str(int(valor))
+
+    # Si no, mostrar hasta 2 decimales
+    return f"{valor:.2f}"
 
 
 def nombre_completo_capitalizado(nombres: str, apellidos: str) -> str:
@@ -552,6 +573,12 @@ def generar_presentacion_por_item(item: DiplomaRequest) -> Presentation:
     
     ##horas de módulos correctamente distribuidas
     cantidad_modulos = MODULOS_COUNT[tipo]
+
+    horas_por_modulo_global = calcular_horas_por_modulo(
+        item.horasAcademicas,
+        cantidad_modulos
+    )
+    
     horas_por_modulo = distribuir_horas_por_modulo(
         item.horasAcademicas,
         cantidad_modulos
@@ -572,6 +599,8 @@ def generar_presentacion_por_item(item: DiplomaRequest) -> Presentation:
 
         "{{HORAS_ACADEMICAS}}": format_two_digits_number(item.horasAcademicas),
         "{{CREDITOS_ACADEMICOS}}": format_two_digits_float(item.creditosAcademicos),
+        
+        "{{HORAS_MODULO}}": horas_por_modulo_global,
 
         "{{FOLIO_NUMERO}}": item.folioNumero,
 
