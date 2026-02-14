@@ -38,14 +38,16 @@ MODELO_FOLDER_MAP = {
     "INSTITUTO": "instituto",
     "UNIVERSIDAD_2QRS": "universidad_2qrs",
     "UNIVERSIDAD_AZUL": "universidad_azul",
-    "COLEGIO_ABOGADOS_CALLAO": "colegio_de_abogados_del_callao",
+    "COLEGIO_ABOGADOS_CALLAO": "colegio_de_abogados_del_callao", 
+    "COLEGIO_DE_PROFESORES_DEL_PERU": "colegio_de_profesores_del_peru",
 }
 
 # Modelos que usan formato de fecha largo (dd de Mes del yyyy)
 MODELOS_FECHA_LARGA = {
     "INSTITUTO",
     "UNIVERSIDAD_AZUL",
-    "COLEGIO_ABOGADOS_CALLAO",
+    "COLEGIO_ABOGADOS_CALLAO", 
+    "COLEGIO_DE_PROFESORES_DEL_PERU",
 }
 
 
