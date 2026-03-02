@@ -1,3 +1,4 @@
+from PIL.Image import item
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -15,6 +16,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from copy import deepcopy
 from typing import List, Tuple
+from pptx.util import Pt
 import qrcode
 
 
@@ -391,7 +393,336 @@ def obtener_modulos_por_tema(tipo: str, tema: str) -> list[str]:
 
     except Exception:
         return [f"MÓDULO {i+1}" for i in range(count)]
+    
+# -------------------------------------------------
+# DIPLOMADO - AZUL - AJUSTE DE TABLA EN CERTIFICADO DE ESTUDIOS (PARTE DE ATRÁS)
+# -------------------------------------------------
+    
+def ajustar_tabla_certificado_estudios_ua(prs: Presentation, tema: str):
+    """
+    Ajusta PH_TABLA en el slide donde existen PH_TEMA y PH_TABLA,
+    moviendo la tabla hacia abajo según las líneas que ocupa:
+    'DIPLOMADO: <tema>'
+    """
+    # márgenes de seguridad (en EMU)
+    GAP_MIN = Cm(0.25)  # espacio mínimo entre texto y tabla (ajustable)
+    MAX_EXTRA_LINES = 3  # tope lógico con tu límite front (102)
 
+    for slide in prs.slides:
+        ph_tema = find_shape_by_name(slide, "PH_TEMA")
+        ph_tabla = find_shape_by_name(slide, "PH_TABLA")
+
+        if not ph_tema or not ph_tabla:
+            continue
+
+        # 1) intentar detectar font-size real del párrafo "DIPLOMADO:"
+        font_pt = 12.0
+        try:
+            tf = ph_tema.text_frame
+            for p in tf.paragraphs:
+                full = "".join(run.text for run in p.runs)
+                if "DIPLOMADO" in full:
+                    # agarra la primera run con tamaño definido
+                    for run in p.runs:
+                        if run.font and run.font.size:
+                            font_pt = run.font.size.pt
+                            raise StopIteration
+        except StopIteration:
+            pass
+        except Exception:
+            pass
+
+        # 2) calcular cuántas líneas ocuparía la línea DIPLOMADO:
+        texto_linea = f"DIPLOMADO: {tema}".strip()
+
+        max_chars = estimate_chars_per_line(ph_tema.width, font_pt)
+
+        # OJO: en tu template hay también "PARTICIPANTE: ...", pero nosotros
+        # solo usamos esta línea para decidir el empuje hacia abajo.
+        lines = wrap_by_words(texto_linea, max_chars)
+        line_count = len(lines)
+
+        # 3) si usa 1 línea, no movemos nada
+        if line_count <= 1:
+            return
+
+        # protección: no debería pasar con el front en 102, pero por si acaso
+        if line_count > MAX_EXTRA_LINES:
+            line_count = MAX_EXTRA_LINES
+
+        # 4) calcular delta (alto de línea aproximado)
+        line_height_emu = int((font_pt * 0.65) * EMU_PER_PT)  # 0.65 es típico
+        extra_lines = line_count - 1
+        delta = extra_lines * line_height_emu
+
+        PUSH_EXTRA = Cm(0.00)
+        if line_count >= 3:
+            PUSH_EXTRA = Cm(0.25)
+
+        ph_tabla.top = ph_tabla.top + delta + int(GAP_MIN) + int(PUSH_EXTRA)
+
+        return  # ajustamos una sola vez
+
+# -------------------------------------------------
+# MISMA LÓGICA DE ARRIBA PERO PARA PROGRAMA DE ESPECIALIZACIÓN (CASO PARTICULAR DE UNIVERSIDAD AZUL)
+# -------------------------------------------------
+    
+def ajustar_tabla_certificado_estudios_ua_programa(prs: Presentation, tema: str):
+    """
+    Ajusta PH_TABLA en el slide donde existen PH_TEMA y PH_TABLA,
+    moviendo la tabla hacia abajo según las líneas que ocupa:
+    'PROGRAMA DE ESPECIALIZACIÓN: <tema>'
+    """
+    GAP_MIN = Cm(0.25)       # espacio mínimo entre texto y tabla
+    MAX_EXTRA_LINES = 3      # tu tope lógico
+
+    for slide in prs.slides:
+        ph_tema = find_shape_by_name(slide, "PH_TEMA")
+        ph_tabla = find_shape_by_name(slide, "PH_TABLA")
+
+        if not ph_tema or not ph_tabla:
+            continue
+
+        # 1) detectar font-size real del párrafo "PROGRAMA..."
+        font_pt = 12.0
+        try:
+            tf = ph_tema.text_frame
+            for p in tf.paragraphs:
+                full = "".join(run.text for run in p.runs)
+                if "PROGRAMA" in full:  # 👈 clave para programa
+                    for run in p.runs:
+                        if run.font and run.font.size:
+                            font_pt = run.font.size.pt
+                            raise StopIteration
+        except StopIteration:
+            pass
+        except Exception:
+            pass
+
+        # 2) calcular cuántas líneas ocuparía la línea PROGRAMA:
+        texto_linea = f"PROGRAMA DE ESPECIALIZACIÓN: {tema}".strip()
+
+        max_chars = estimate_chars_per_line(ph_tema.width, font_pt)
+        lines = wrap_by_words(texto_linea, max_chars)
+        line_count = len(lines)
+
+        # 3) si usa 1 línea, no movemos nada
+        if line_count <= 1:
+            return
+
+        # protección
+        if line_count > MAX_EXTRA_LINES:
+            line_count = MAX_EXTRA_LINES
+
+        # 4) delta por líneas extra
+        line_height_emu = int((font_pt * 0.65) * EMU_PER_PT)
+        extra_lines = line_count - 1
+        delta = extra_lines * line_height_emu
+
+        # 5) empuje extra cuando ya estamos en 3 líneas (igual que diplomado)
+        PUSH_EXTRA = Cm(0.00)
+        if line_count >= 3:
+            PUSH_EXTRA = Cm(0.25)
+
+        ph_tabla.top = ph_tabla.top + delta + int(GAP_MIN) + int(PUSH_EXTRA)
+        return
+    
+
+# -------------------------------------------------
+# MISMA LÓGICA PERO PARA CURSO (UNIVERSIDAD AZUL)
+# -------------------------------------------------
+
+def ajustar_tabla_certificado_estudios_ua_curso(prs: Presentation, tema: str):
+    """
+    Ajusta PH_TABLA en el slide donde existen PH_TEMA y PH_TABLA,
+    moviendo la tabla hacia abajo según las líneas que ocupa:
+    'CURSO: <tema>'
+    """
+    GAP_MIN = Cm(0.25)       # espacio mínimo entre PH_TEMA y PH_TABLA
+    MAX_EXTRA_LINES = 3      # tope lógico
+
+    for slide in prs.slides:
+        ph_tema = find_shape_by_name(slide, "PH_TEMA")
+        ph_tabla = find_shape_by_name(slide, "PH_TABLA")
+
+        if not ph_tema or not ph_tabla:
+            continue
+
+        # 1) detectar font-size real del párrafo que contiene "CURSO"
+        font_pt = 12.0
+        try:
+            tf = ph_tema.text_frame
+            for p in tf.paragraphs:
+                full = "".join(run.text for run in p.runs)
+                if "CURSO" in full:
+                    for run in p.runs:
+                        if run.font and run.font.size:
+                            font_pt = run.font.size.pt
+                            raise StopIteration
+        except StopIteration:
+            pass
+        except Exception:
+            pass
+
+        # 2) calcular cuántas líneas ocuparía la línea CURSO:
+        texto_linea = f"CURSO: {tema}".strip()
+
+        max_chars = estimate_chars_per_line(ph_tema.width, font_pt)
+        lines = wrap_by_words(texto_linea, max_chars)
+        line_count = len(lines)
+
+        # 3) si usa 1 línea, no movemos nada
+        if line_count <= 1:
+            return
+
+        # protección
+        if line_count > MAX_EXTRA_LINES:
+            line_count = MAX_EXTRA_LINES
+
+        # 4) delta por líneas extra
+        line_height_emu = int((font_pt * 0.65) * EMU_PER_PT)
+        extra_lines = line_count - 1
+        delta = extra_lines * line_height_emu
+
+        # 5) empuje extra cuando ya estamos en 3 líneas (igual que los otros)
+        PUSH_EXTRA = Cm(0.00)
+        if line_count >= 3:
+            PUSH_EXTRA = Cm(0.25)
+
+        ph_tabla.top = ph_tabla.top + delta + int(GAP_MIN) + int(PUSH_EXTRA)
+        return  # ajustamos una sola vez
+
+
+# -------------------------------------------------
+# MISMA LÓGICA PERO PARA CURSO DE CAPACITACIÓN (UNIVERSIDAD AZUL)
+# -------------------------------------------------
+
+def ajustar_tabla_certificado_estudios_ua_curso_capacitacion(prs: Presentation, tema: str):
+    """
+    Ajusta PH_TABLA en el slide donde existen PH_TEMA y PH_TABLA,
+    moviendo la tabla hacia abajo según las líneas que ocupa:
+    'CURSO DE CAPACITACIÓN: <tema>'
+    """
+    GAP_MIN = Cm(0.25)       # espacio mínimo entre PH_TEMA y PH_TABLA
+    MAX_EXTRA_LINES = 3      # tope lógico
+
+    for slide in prs.slides:
+        ph_tema = find_shape_by_name(slide, "PH_TEMA")
+        ph_tabla = find_shape_by_name(slide, "PH_TABLA")
+
+        if not ph_tema or not ph_tabla:
+            continue
+
+        # 1) detectar font-size real del párrafo que contiene "CAPACITACIÓN"
+        font_pt = 12.0
+        try:
+            tf = ph_tema.text_frame
+            for p in tf.paragraphs:
+                full = "".join(run.text for run in p.runs)
+                # buscamos algo distintivo de este tipo
+                if "CAPACIT" in full or "CURSO" in full:
+                    for run in p.runs:
+                        if run.font and run.font.size:
+                            font_pt = run.font.size.pt
+                            raise StopIteration
+        except StopIteration:
+            pass
+        except Exception:
+            pass
+
+        # 2) calcular cuántas líneas ocuparía la línea CURSO DE CAPACITACIÓN:
+        texto_linea = f"CURSO DE CAPACITACIÓN: {tema}".strip()
+
+        max_chars = estimate_chars_per_line(ph_tema.width, font_pt)
+        lines = wrap_by_words(texto_linea, max_chars)
+        line_count = len(lines)
+
+        # 3) si usa 1 línea, no movemos nada
+        if line_count <= 1:
+            return
+
+        # protección
+        if line_count > MAX_EXTRA_LINES:
+            line_count = MAX_EXTRA_LINES
+
+        # 4) delta por líneas extra
+        line_height_emu = int((font_pt * 0.65) * EMU_PER_PT)
+        extra_lines = line_count - 1
+        delta = extra_lines * line_height_emu
+
+        # 5) empuje extra cuando ya estamos en 3 líneas
+        PUSH_EXTRA = Cm(0.00)
+        if line_count >= 3:
+            PUSH_EXTRA = Cm(0.25)
+
+        ph_tabla.top = ph_tabla.top + delta + int(GAP_MIN) + int(PUSH_EXTRA)
+        return  # ajustamos una sola vez
+
+
+# -------------------------------------------------
+# MISMA LÓGICA PERO PARA CURSO DE ACTUALIZACIÓN (UNIVERSIDAD AZUL)
+# -------------------------------------------------
+
+def ajustar_tabla_certificado_estudios_ua_curso_actualizacion(prs: Presentation, tema: str):
+    """
+    Ajusta PH_TABLA en el slide donde existen PH_TEMA y PH_TABLA,
+    moviendo la tabla hacia abajo según las líneas que ocupa:
+    'CURSO DE ACTUALIZACIÓN: <tema>'
+    """
+    GAP_MIN = Cm(0.25)       # espacio mínimo entre PH_TEMA y PH_TABLA
+    MAX_EXTRA_LINES = 3      # tope lógico
+
+    for slide in prs.slides:
+        ph_tema = find_shape_by_name(slide, "PH_TEMA")
+        ph_tabla = find_shape_by_name(slide, "PH_TABLA")
+
+        if not ph_tema or not ph_tabla:
+            continue
+
+        # 1) detectar font-size real del párrafo que contiene "ACTUALIZACIÓN"
+        font_pt = 12.0
+        try:
+            tf = ph_tema.text_frame
+            for p in tf.paragraphs:
+                full = "".join(run.text for run in p.runs)
+                # distintivo: ACTUALIZACIÓN
+                if "ACTUALIZ" in full or "CURSO" in full:
+                    for run in p.runs:
+                        if run.font and run.font.size:
+                            font_pt = run.font.size.pt
+                            raise StopIteration
+        except StopIteration:
+            pass
+        except Exception:
+            pass
+
+        # 2) calcular cuántas líneas ocuparía la línea CURSO DE ACTUALIZACIÓN:
+        texto_linea = f"CURSO DE ACTUALIZACIÓN: {tema}".strip()
+
+        max_chars = estimate_chars_per_line(ph_tema.width, font_pt)
+        lines = wrap_by_words(texto_linea, max_chars)
+        line_count = len(lines)
+
+        # 3) si usa 1 línea, no movemos nada
+        if line_count <= 1:
+            return
+
+        # protección
+        if line_count > MAX_EXTRA_LINES:
+            line_count = MAX_EXTRA_LINES
+
+        # 4) delta por líneas extra
+        line_height_emu = int((font_pt * 0.65) * EMU_PER_PT)
+        extra_lines = line_count - 1
+        delta = extra_lines * line_height_emu
+
+        # 5) empuje extra cuando ya estamos en 3 líneas
+        PUSH_EXTRA = Cm(0.00)
+        if line_count >= 3:
+            PUSH_EXTRA = Cm(0.25)
+
+        ph_tabla.top = ph_tabla.top + delta + int(GAP_MIN) + int(PUSH_EXTRA)
+        return  # ajustamos una sola vez
 
 # -------------------------------------------------
 # CORS
@@ -472,6 +803,70 @@ def replace_placeholders(prs, mapping):
     for master in prs.slide_masters:
         for shape in master.shapes:
             replace_in_shape(shape, mapping)
+            
+            
+EMU_PER_PT = 12700
+
+def find_shape_by_name(slide, name: str):
+    for shp in slide.shapes:
+        if shp.name == name:
+            return shp
+    return None
+
+def estimate_chars_per_line(shape_width_emu: int, font_size_pt: float) -> int:
+    """
+    Estimación razonable sin medir fuente real:
+    - ancho en pt = width_emu / 12700
+    - ancho promedio de carácter ~ 0.52 * font_size (depende de la fuente)
+    """
+    if not font_size_pt or font_size_pt <= 0:
+        font_size_pt = 12.0
+
+    width_pt = shape_width_emu / EMU_PER_PT
+    avg_char_pt = font_size_pt * 0.52
+    cpl = int(width_pt / avg_char_pt)
+
+    SAFETY_FACTOR = 0.85  # prueba 0.88; si aún falla a 3 líneas, baja a 0.85
+    cpl = int(cpl * SAFETY_FACTOR)
+
+    return max(10, cpl)
+
+def wrap_by_words(text: str, max_chars: int) -> list[str]:
+    """
+    Simula word-wrap:
+    - arma líneas sin partir palabras (salvo palabras largas)
+    - si una palabra es más larga que max_chars, se parte (para no romper todo)
+    """
+    words = text.split(" ")
+    lines = []
+    current = ""
+
+    for w in words:
+        if current == "":
+            candidate = w
+        else:
+            candidate = current + " " + w
+
+        if len(candidate) <= max_chars:
+            current = candidate
+            continue
+
+        # si current ya tiene algo, lo cerramos
+        if current:
+            lines.append(current)
+            current = ""
+
+        # si la palabra sola no cabe, la partimos
+        while len(w) > max_chars:
+            lines.append(w[:max_chars])
+            w = w[max_chars:]
+
+        current = w
+
+    if current:
+        lines.append(current)
+
+    return lines
 
 
 # -------------------------------------------------
@@ -619,7 +1014,27 @@ def generar_presentacion_por_item(item: DiplomaRequest) -> Presentation:
 
 
     replace_placeholders(prs, mapping)
-    
+
+    # Ajuste SOLO para Universidad Azul + Diplomado (certificado de estudios / parte de atrás)
+    if modelo_cert == "UNIVERSIDAD_AZUL" and tipo == "DIPLOMADO":
+        ajustar_tabla_certificado_estudios_ua(prs, item.temaDiplomado.upper())
+        
+    # ✅ NUEVO: Ajuste SOLO para Universidad Azul + Programa de Especialización (certificado de estudios / parte de atrás)
+    if modelo_cert == "UNIVERSIDAD_AZUL" and tipo == "PROGRAMA DE ESPECIALIZACIÓN":
+        ajustar_tabla_certificado_estudios_ua_programa(prs, item.temaDiplomado.upper())
+        
+    # ✅ NUEVO: Ajuste SOLO para Universidad Azul + Curso (certificado de estudios / parte de atrás)
+    if modelo_cert == "UNIVERSIDAD_AZUL" and tipo == "CURSO":
+        ajustar_tabla_certificado_estudios_ua_curso(prs, item.temaDiplomado.upper())
+        
+    # ✅ NUEVO: Ajuste SOLO para Universidad Azul + Curso de Capacitación (certificado de estudios / parte de atrás)
+    if modelo_cert == "UNIVERSIDAD_AZUL" and tipo == "CURSO_DE_CAPACITACION":
+        ajustar_tabla_certificado_estudios_ua_curso_capacitacion(prs, item.temaDiplomado.upper())
+        
+    # ✅ NUEVO: Ajuste SOLO para Universidad Azul + Curso de Actualización (certificado de estudios / parte de atrás)
+    if modelo_cert == "UNIVERSIDAD_AZUL" and tipo == "CURSO_DE_ACTUALIZACION":
+        ajustar_tabla_certificado_estudios_ua_curso_actualizacion(prs, item.temaDiplomado.upper())
+
     return prs
 
 

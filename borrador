@@ -1,0 +1,1492 @@
+Bien, quiero realizar cambios dentro de mi aplicación, lo que hace actualmente no te lo diré, primero quiero que lo analices el código backend, así como archivos front, y me digas qué opinas o qué interpretas que hace la aplicación en sí.
+
+main.py (back) :
+
+from logging import root
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE
+from pptx.util import Cm
+from io import BytesIO
+import unicodedata
+import re
+import os
+import json
+from datetime import datetime
+from dotenv import load_dotenv
+from openai import OpenAI
+from copy import deepcopy
+from typing import List, Tuple
+from pptx.util import Cm, Pt
+import qrcode
+
+
+
+# -------------------------------------------------
+# CONFIGURACIÓN GENERAL
+# -------------------------------------------------
+
+load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+app = FastAPI(title="Certificados API", version="2.3.0")
+
+# Modelos disponibles (carpetas dentro de app/templates)
+# IMPORTANTE: Deben coincidir con los valores enviados desde el frontend:
+# - INSTITUTO
+# - UNIVERSIDAD_2QRS
+# - UNIVERSIDAD_AZUL
+# - COLEGIO_ABOGADOS_CALLAO
+MODELO_FOLDER_MAP = {
+    "INSTITUTO": "instituto",
+    "UNIVERSIDAD_2QRS": "universidad_2qrs",
+    "UNIVERSIDAD_AZUL": "universidad_azul",
+    "COLEGIO_ABOGADOS_CALLAO": "colegio_de_abogados_del_callao", 
+    "COLEGIO_DE_PROFESORES_DEL_PERU": "colegio_de_profesores_del_peru",
+}
+
+# Modelos que usan formato de fecha largo (dd de Mes del yyyy)
+MODELOS_FECHA_LARGA = {
+    "INSTITUTO",
+    "UNIVERSIDAD_AZUL",
+    "COLEGIO_ABOGADOS_CALLAO", 
+    "COLEGIO_DE_PROFESORES_DEL_PERU",
+}
+
+
+# Nombre de archivo de plantilla por tipo (dentro de cada carpeta de modelo)
+TEMPLATE_FILENAME_MAP = {
+    "DIPLOMADO": "plantilla_diplomado.pptx",
+    "PROGRAMA DE ESPECIALIZACIÓN": "plantilla_programa_de_especializacion.pptx",
+    "CURSO": "plantilla_curso.pptx",
+    "CURSO_DE_CAPACITACION": "plantilla_curso_de_capacitacion.pptx",
+    "CURSO_DE_ACTUALIZACION": "plantilla_curso_de_actualizacion.pptx",
+}
+
+# Nº de módulos por tipo
+MODULOS_COUNT = {
+    "DIPLOMADO": 8,
+    "PROGRAMA DE ESPECIALIZACIÓN": 8,
+    "CURSO": 5,
+    "CURSO_DE_CAPACITACION": 5,
+    "CURSO_DE_ACTUALIZACION": 5,
+}
+
+# Cache en memoria: (tipo, tema) -> módulos
+MODULOS_CACHE: dict[Tuple[str, str], List[str]] = {}
+
+# -------------------------------------------------
+# REGLAS DE LAYOUT (TEMA / MÓDULOS)
+# -------------------------------------------------
+
+TEMA_RULES = {
+    "DIPLOMADO": {"max_chars": 102, "max_lines": 4},
+    "PROGRAMA DE ESPECIALIZACIÓN": {"max_chars": 76, "max_lines": 3},
+    "CURSO": {"max_chars": 102, "max_lines": 4},
+    "CURSO_DE_CAPACITACION": {"max_chars": 102, "max_lines": 4},
+    "CURSO_DE_ACTUALIZACION": {"max_chars": 102, "max_lines": 4},
+}
+
+MODULO_RULES = {
+    # Diplomado / Programa
+    "DIPLOMADO": {"max_chars": 80, "font_prefer": 10.0, "font_min": 9.5},
+    "PROGRAMA DE ESPECIALIZACIÓN": {"max_chars": 80, "font_prefer": 10.0, "font_min": 9.5},
+
+    # Curso / Capacitación / Actualización
+    "CURSO": {"max_chars_10": 114, "max_chars_9_5": 130},
+    "CURSO_DE_CAPACITACION": {"max_chars_10": 114, "max_chars_9_5": 130},
+    "CURSO_DE_ACTUALIZACION": {"max_chars_10": 114, "max_chars_9_5": 130},
+}
+
+# -------------------------------------------------
+# UTILIDADES
+# -------------------------------------------------
+
+def safe_filename(text: str) -> str:
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    text = re.sub(r"[^a-zA-Z0-9_-]", "_", text)
+    return text
+
+
+def format_date_ddmmyyyy(date_str: str) -> str:
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d").strftime("%d/%m/%Y")
+    except ValueError:
+        return date_str
+
+
+def format_date_long_es(date_str: str) -> str:
+    try:
+        date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+        meses = [
+            "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+            "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
+        ]
+
+        # ✅ día con cero a la izquierda
+        dia = f"{date_obj.day:02d}"
+
+        return f"{dia} de {meses[date_obj.month - 1]} del {date_obj.year}"
+    except ValueError:
+        return date_str
+
+def format_date_range_long_es(fecha_inicio: str, fecha_fin: str) -> tuple[str, str]:
+    """
+    Devuelve (fecha_inicio_formateada, fecha_fin_formateada)
+    aplicando la regla:
+    - Si ambos años son iguales → el año solo se muestra en la fecha final
+    - Si son distintos → cada fecha muestra su año
+    """
+    try:
+        inicio = datetime.strptime(fecha_inicio, "%Y-%m-%d")
+        fin = datetime.strptime(fecha_fin, "%Y-%m-%d")
+
+        meses = [
+            "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+            "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
+        ]
+
+        dia_inicio = f"{inicio.day:02d}"
+        dia_fin = f"{fin.day:02d}"
+
+        if inicio.year == fin.year:
+            fecha_inicio_str = f"{dia_inicio} de {meses[inicio.month - 1]}"
+            fecha_fin_str = f"{dia_fin} de {meses[fin.month - 1]} del {fin.year}"
+        else:
+            fecha_inicio_str = f"{dia_inicio} de {meses[inicio.month - 1]} del {inicio.year}"
+            fecha_fin_str = f"{dia_fin} de {meses[fin.month - 1]} del {fin.year}"
+
+        return fecha_inicio_str, fecha_fin_str
+
+    except ValueError:
+        # fallback seguro
+        return format_date_long_es(fecha_inicio), format_date_long_es(fecha_fin)
+
+
+def format_two_digits_number(value: int) -> str:
+    """
+    Formatea números enteros a dos dígitos.
+    Ej: 3 -> 03, 12 -> 12
+    """
+    try:
+        return f"{int(value):02d}"
+    except (ValueError, TypeError):
+        return str(value)
+
+
+def format_two_digits_float(value: float) -> str:
+    """
+    Formatea números decimales manteniendo decimales,
+    pero con parte entera a dos dígitos.
+    Ej: 3 -> 03
+        3.5 -> 03.5
+        12 -> 12
+        12.25 -> 12.25
+    """
+    try:
+        entero = int(value)
+        decimal = value - entero
+
+        if decimal == 0:
+            return f"{entero:02d}"
+
+        # Eliminar ceros innecesarios en decimales
+        decimal_str = str(round(decimal, 2)).lstrip("0")
+        return f"{entero:02d}{decimal_str}"
+    except (ValueError, TypeError):
+        return str(value)
+
+
+def calcular_horas_por_modulo(total_horas: int, cantidad_modulos: int) -> str:
+    """
+    Calcula horas por módulo:
+    total_horas / cantidad_modulos
+    Devuelve string sin decimales si es entero, o con 2 decimales si no.
+    """
+    if cantidad_modulos <= 0:
+        return "0"
+
+    valor = total_horas / cantidad_modulos
+
+    # Si es entero, no mostrar decimales
+    if valor.is_integer():
+        return str(int(valor))
+
+    # Si no, mostrar hasta 2 decimales
+    return f"{valor:.2f}"
+
+
+def nombre_completo_capitalizado(nombres: str, apellidos: str) -> str:
+    texto = f"{nombres} {apellidos}".strip().lower()
+    return " ".join(p.capitalize() for p in texto.split())
+
+
+def modelo_con_mayuscula_inicial(tipo_modelo: str) -> str:
+    texto = tipo_modelo.strip().lower().split()
+    if not texto:
+        return ""
+    texto[0] = texto[0].capitalize()
+    return " ".join(texto)
+
+def normalize_spaces(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip())
+
+
+def wrap_words_to_lines(text: str, max_lines: int, target_line_len: int) -> tuple[str, int]:
+    words = normalize_spaces(text).split(" ")
+    lines = []
+    cur = ""
+
+    for w in words:
+        if not cur:
+            cur = w
+            continue
+        if len(cur) + 1 + len(w) > target_line_len:
+            lines.append(cur)
+            cur = w
+        else:
+            cur += " " + w
+
+    if cur:
+        lines.append(cur)
+
+    return "\n".join(lines[:max_lines]), len(lines)
+
+def can_use_openai() -> bool:
+    return bool(OPENAI_API_KEY and OPENAI_API_KEY.strip())
+
+
+def ai_compact_text(original: str, max_chars: int, max_lines: int, purpose: str) -> str:
+    if not can_use_openai():
+        # fallback sin IA: recorte duro + wrap simple
+        s = normalize_spaces(original).upper()
+        s = s[:max_chars].rstrip()
+        return s
+    # IA solo cuando no entra (como acordamos)
+    prompt = f"""
+Devuelve SOLO texto (sin comillas, sin listas), en MAYÚSCULAS, para {purpose} de un certificado.
+REGLAS DURAS:
+- Máximo {max_chars} caracteres (incluye espacios)
+- Máximo {max_lines} líneas (usa saltos de línea si es necesario)
+- Mantén el significado académico
+- Español, formal
+TEXTO ORIGINAL:
+{original}
+""".strip()
+
+    r = client.responses.create(
+        model="gpt-5-mini",
+        input=[
+            {"role": "system", "content": "Eres un editor académico extremadamente estricto."},
+            {"role": "user", "content": prompt},
+        ],
+    )
+    return normalize_spaces(r.output_text).upper()
+
+
+def ensure_tema_fits(tipo: str, tema: str) -> str:
+    rules = TEMA_RULES[tipo]
+    tema_up = normalize_spaces(tema).upper()
+
+    # heurística de chars por línea (balanceada)
+    target_len = max(18, rules["max_chars"] // rules["max_lines"])
+
+    # 1) wrap primero
+    if len(tema_up) <= rules["max_chars"]:
+        wrapped, lines_count = wrap_words_to_lines(tema_up, rules["max_lines"], target_len)
+        if lines_count <= rules["max_lines"]:
+            return wrapped
+
+    # 2) IA solo si no entra
+    compact = ai_compact_text(tema_up, rules["max_chars"], rules["max_lines"], "el TÍTULO/TEMA")
+    wrapped, _ = wrap_words_to_lines(compact, rules["max_lines"], target_len)
+    return wrapped
+
+
+def choose_modulo_text_and_font(tipo: str, modulo: str) -> tuple[str, float]:
+    t = normalize_spaces(modulo).upper()
+    rules = MODULO_RULES[tipo]
+
+    # Diplomado / Programa
+    if "max_chars" in rules:
+        if len(t) <= rules["max_chars"]:
+            return t, rules["font_prefer"]
+        compact = ai_compact_text(t, rules["max_chars"], 1, "un MÓDULO")
+        return compact, rules["font_min"]
+
+    # Curso / Capacitación / Actualización
+    if len(t) <= rules["max_chars_10"]:
+        return t, 10.0
+    if len(t) <= rules["max_chars_9_5"]:
+        return t, 9.5
+
+    compact = ai_compact_text(t, rules["max_chars_9_5"], 1, "un MÓDULO")
+    return compact, 9.5
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # apunta a la carpeta /app
+
+def resolve_template_path(modelo_certificado: str, tipo_modelo: str) -> str:
+    modelo_key = (modelo_certificado or "").upper().strip()
+    tipo_key = (tipo_modelo or "").upper().strip()
+
+    if modelo_key not in MODELO_FOLDER_MAP:
+        raise HTTPException(status_code=400, detail=f"Modelo de certificado no soportado: {modelo_key}")
+
+    if tipo_key not in TEMPLATE_FILENAME_MAP:
+        raise HTTPException(status_code=400, detail=f"Tipo de certificado no soportado: {tipo_key}")
+
+    folder = MODELO_FOLDER_MAP[modelo_key]
+    filename = TEMPLATE_FILENAME_MAP[tipo_key]
+
+    # ✅ COMO main.py está en /app y templates está en /app/templates
+    template_path = os.path.join(BASE_DIR, "templates", folder, filename)
+
+    return template_path
+
+##agregué
+def normalize_text_for_url(text: str) -> str:
+    text = unicodedata.normalize("NFKD", text)
+    text = text.encode("ascii", "ignore").decode("ascii")
+    text = re.sub(r"[^a-zA-Z0-9]", "", text)
+    return text.lower()
+
+
+def build_qr_url(nombres: str, apellidos: str, tema: str) -> str:
+    primer_nombre = nombres.strip().split()[0]
+    primer_apellido = apellidos.strip().split()[0]
+
+    base = (
+        normalize_text_for_url(primer_nombre)
+        + normalize_text_for_url(primer_apellido)
+        + normalize_text_for_url(tema)
+    )
+
+    return f"https://especializacionvirtual.com/certificados/{base}.pdf"
+
+
+def generate_qr_image(url: str) -> BytesIO:
+    qr = qrcode.QRCode(
+        version=4,
+        error_correction=qrcode.constants.ERROR_CORRECT_Q,
+        box_size=10,
+        border=1,
+    )
+    qr.add_data(url)
+    qr.make(fit=True)
+
+    img = qr.make_image(fill_color="black", back_color="white")
+
+    buffer = BytesIO()
+    img.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
+##fin agregué
+
+def insert_qr_at_placeholder(prs: Presentation, qr_stream: BytesIO):
+    QR_SIZE = Cm(2.78)
+
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if not shape.has_text_frame:
+                continue
+
+            if "{{QR_CODE}}" not in shape.text_frame.text:
+                continue
+
+            left = shape.left
+            top = shape.top
+
+            shape.text_frame.clear()
+
+            slide.shapes.add_picture(
+                qr_stream,
+                left=left,
+                top=top,
+                width=QR_SIZE,
+                height=QR_SIZE,
+            )
+
+            return  # solo un QR
+
+
+
+
+                    
+
+##DISTRIBUIR HORAS POR MÓDULO
+def distribuir_horas_por_modulo(total_horas: int, cantidad_modulos: int) -> List[int]:
+    """
+    Distribuye las horas de forma progresiva y variada,
+    asegurando que la suma final sea EXACTA.
+    """
+    if cantidad_modulos <= 0:
+        return []
+
+    pesos = []
+    incremento = 0.1
+    for i in range(cantidad_modulos):
+        peso = 1 + (i * incremento)
+        pesos.append(peso)
+    suma_pesos = sum(pesos)
+    
+    horas = [
+        int((peso / suma_pesos) * total_horas)
+        for peso in pesos
+    ]
+
+    # Ajuste para asegurar suma exacta
+    diferencia = total_horas - sum(horas)
+
+    # Repartir diferencia empezando por el último módulo
+    i = cantidad_modulos - 1
+    while diferencia > 0:
+        horas[i] += 1
+        diferencia -= 1
+        i -= 1
+        if i < 0:
+            i = cantidad_modulos - 1
+
+    return horas
+
+
+
+
+# -------------------------------------------------
+# OPENAI – GENERACIÓN DE MÓDULOS DINÁMICA
+# -------------------------------------------------
+
+def build_prompt(tema: str, count: int) -> str:
+    return f"""
+Devuelve EXCLUSIVAMENTE un JSON válido con este formato exacto:
+
+{{
+  "modulos": [
+    {', '.join(['"string"' for _ in range(count)])}
+  ]
+}}
+
+REGLAS OBLIGATORIAS:
+- Exactamente {count} módulos
+- SOLO títulos (NO descripciones)
+- Para CURSO/CAPACITACION/ACTUALIZACION: “máximo 114 caracteres por módulo (ideal), nunca exceder 130”
+- Para DIPLOMADO/PROGRAMA: “máximo 80 caracteres por módulo”
+- En español
+- NO numeración
+- NO texto fuera del JSON
+- NO explicaciones
+
+Certificado: {tema}
+""".strip()
+
+
+def obtener_modulos_por_tema(tipo: str, tema: str) -> list[str]:
+    cache_key = (tipo, tema)
+    if cache_key in MODULOS_CACHE:
+        return MODULOS_CACHE[cache_key]
+
+    if tipo not in MODULOS_COUNT:
+        raise ValueError("Tipo no soportado para módulos")
+
+    count = MODULOS_COUNT[tipo]
+
+    try:
+        response = client.responses.create(
+            model="gpt-5-mini",
+            input=[
+                {"role": "system", "content": "Eres un asistente académico extremadamente estricto."},
+                {"role": "user", "content": build_prompt(tema, count)}
+            ]
+        )
+
+        data = json.loads(response.output_text)
+        modulos = data.get("modulos", [])
+
+        if not isinstance(modulos, list) or len(modulos) != count:
+            raise ValueError("Cantidad de módulos inválida")
+
+        modulos = [str(m).upper().strip() for m in modulos]
+        MODULOS_CACHE[cache_key] = modulos
+        return modulos
+
+    except Exception:
+        return [f"MÓDULO {i+1}" for i in range(count)]
+
+
+# -------------------------------------------------
+# CORS
+# -------------------------------------------------
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# -------------------------------------------------
+# DTO
+# -------------------------------------------------
+
+class DiplomaRequest(BaseModel):
+    modeloCertificado: str
+    tipoModelo: str
+    nombres: str
+    apellidos: str
+    temaDiplomado: str
+    fechaInicio: str
+    fechaFin: str
+    horasAcademicas: int
+    creditosAcademicos: int
+    folioNumero: str
+    fechaEmision: str
+
+
+class BatchRequest(BaseModel):
+    items: List[DiplomaRequest]
+
+
+# -------------------------------------------------
+# REEMPLAZO DE TEXTO (PRESERVA FUENTES)
+# -------------------------------------------------
+
+def replace_in_text_frame_preserve_font(text_frame, mapping, font_overrides=None):
+    font_overrides = font_overrides or {}
+
+    for paragraph in text_frame.paragraphs:
+        for run in paragraph.runs:
+            if not run.text:
+                continue
+
+            for k, v in mapping.items():
+                if k in run.text:
+                    run.text = run.text.replace(k, v)
+
+                    # si este placeholder requiere tamaño fijo (módulos), lo aplicamos
+                    if k in font_overrides:
+                        run.font.size = Pt(font_overrides[k])
+
+
+def replace_in_shape(shape, mapping, font_overrides=None):
+    if shape.has_text_frame:
+        replace_in_text_frame_preserve_font(shape.text_frame, mapping, font_overrides)
+
+    if shape.has_table:
+        for row in shape.table.rows:
+            for cell in row.cells:
+                replace_in_text_frame_preserve_font(cell.text_frame, mapping, font_overrides)
+
+    if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+        for s in shape.shapes:
+            replace_in_shape(s, mapping, font_overrides)
+
+
+def replace_placeholders(prs, mapping, font_overrides=None):
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            replace_in_shape(shape, mapping, font_overrides)
+
+        if slide.has_notes_slide:
+            for shape in slide.notes_slide.shapes:
+                replace_in_shape(shape, mapping, font_overrides)
+
+    for layout in prs.slide_layouts:
+        for shape in layout.shapes:
+            replace_in_shape(shape, mapping, font_overrides)
+
+    for master in prs.slide_masters:
+        for shape in master.shapes:
+            replace_in_shape(shape, mapping, font_overrides)
+
+
+# -------------------------------------------------
+# MERGE PPTX
+# -------------------------------------------------
+
+def _replace_rids_in_element(el, rid_map: dict[str, str]):
+    for e in el.iter():
+        if not hasattr(e, "attrib"):
+            continue
+        for attr_key, attr_val in list(e.attrib.items()):
+            if attr_val in rid_map:
+                e.attrib[attr_key] = rid_map[attr_val]
+
+
+def clone_slide_into(dest_prs: Presentation, src_slide):
+    # ✅ USAR LAYOUT EN BLANCO (evita placeholders duplicados)
+    blank_layout = dest_prs.slide_layouts[6]
+    new_slide = dest_prs.slides.add_slide(blank_layout)
+
+    spTree = new_slide.shapes._spTree
+    src_spTree = src_slide.shapes._spTree
+
+    for child in list(src_spTree):
+        tag = child.tag.lower()
+
+        # ❌ NO copiar propiedades internas del layout
+        if tag.endswith("nvgrpsppr") or tag.endswith("grpsppr"):
+            continue
+
+        spTree.insert_element_before(deepcopy(child), 'p:extLst')
+
+    # 🔁 Copiar relaciones (imágenes, fondos, etc.)
+    rid_map = {}
+    for rId, rel in src_slide.part.rels.items():
+        try:
+            new_rId = new_slide.part.relate_to(
+                rel._target,
+                rel.reltype,
+                is_external=rel.is_external
+            )
+            rid_map[rId] = new_rId
+        except Exception:
+            continue
+
+    _replace_rids_in_element(new_slide._element, rid_map)
+
+
+def merge_presentations(presentations: List[Presentation]) -> Presentation:
+    if not presentations:
+        raise ValueError("No hay presentaciones para unir")
+
+    # 🔒 Usar la primera presentación como base (PRESERVA TEMA Y COLORES)
+    dest = presentations[0]
+
+    for prs in presentations[1:]:
+        for slide in prs.slides:
+            clone_slide_into(dest, slide)
+
+    return dest
+
+
+# -------------------------------------------------
+# GENERACIÓN DE PPTX POR ITEM  ✅ RESTAURADA
+# -------------------------------------------------
+
+def generar_presentacion_por_item(item: DiplomaRequest) -> Presentation:
+    tipo = (item.tipoModelo or "").upper().strip()
+
+    if tipo not in MODULOS_COUNT:
+        raise HTTPException(status_code=400, detail=f"tipoModelo inválido: {tipo}")
+
+    modelo_cert = item.modeloCertificado.upper().strip()
+
+    template_path = resolve_template_path(modelo_cert, tipo)
+
+    if not os.path.exists(template_path):
+        raise HTTPException(
+            status_code=500,
+            detail=f"No existe la plantilla: {template_path}"
+        )
+
+    prs = Presentation(template_path)
+    
+    # Determinar formato de fecha según modelo de certificado
+    usar_fecha_larga = modelo_cert in MODELOS_FECHA_LARGA
+
+    if usar_fecha_larga:
+        fecha_inicio, fecha_fin = format_date_range_long_es(
+            item.fechaInicio,
+            item.fechaFin
+        )
+        fecha_emision_larga = format_date_long_es(item.fechaEmision)
+        fecha_emision_corta = format_date_ddmmyyyy(item.fechaEmision)
+        # fecha_emision = format_date_long_es(item.fechaEmision)
+    else:
+        fecha_inicio = format_date_ddmmyyyy(item.fechaInicio)
+        fecha_fin = format_date_ddmmyyyy(item.fechaFin)
+        fecha_emision_larga = format_date_long_es(item.fechaEmision)
+        fecha_emision_corta = format_date_ddmmyyyy(item.fechaEmision)
+        # fecha_emision = format_date_ddmmyyyy(item.fechaEmision)
+    
+    nombre_posterior = nombre_completo_capitalizado(item.nombres, item.apellidos)
+    modulos = obtener_modulos_por_tema(tipo, item.temaDiplomado)
+    
+    ##horas de módulos correctamente distribuidas
+    cantidad_modulos = MODULOS_COUNT[tipo]
+
+    horas_por_modulo_global = calcular_horas_por_modulo(
+        item.horasAcademicas,
+        cantidad_modulos
+    )
+    
+    horas_por_modulo = distribuir_horas_por_modulo(
+        item.horasAcademicas,
+        cantidad_modulos
+    )
+
+    tema_final = ensure_tema_fits(tipo, item.temaDiplomado)
+
+    mapping = {
+        "{{MODELO}}": tipo,
+        "{{MODELO_MINUSCULA}}": modelo_con_mayuscula_inicial(tipo),
+
+        "{{NOMBRES}}": item.nombres.upper(),
+        "{{APELLIDOS}}": item.apellidos.upper(),
+        "{{TEMA_DIPLOMADO}}": tema_final,
+
+        "{{NOMBRE_COMPLETO_MINUSCULA}}": nombre_posterior,
+
+        "{{FECHA_INICIO}}": fecha_inicio,
+        "{{FECHA_FIN}}": fecha_fin,
+
+        "{{HORAS_ACADEMICAS}}": format_two_digits_number(item.horasAcademicas),
+        "{{CREDITOS_ACADEMICOS}}": format_two_digits_float(item.creditosAcademicos),
+        
+        "{{HORAS_MODULO}}": horas_por_modulo_global,
+
+        "{{FOLIO_NUMERO}}": item.folioNumero,
+
+        "{{FECHA_EMISION_LARGA}}": fecha_emision_larga,
+        "{{FECHA_EMISION_CORTA}}": fecha_emision_corta,
+    }
+    
+    font_overrides = {}
+
+    for i, m in enumerate(modulos, start=1):
+        texto_mod, font_sz = choose_modulo_text_and_font(tipo, m)
+        key = f"{{{{MODULO_{i}}}}}"
+        mapping[key] = texto_mod
+        font_overrides[key] = font_sz
+
+    
+    ##Agregar horas por módulo al mapping       
+    for i, h in enumerate(horas_por_modulo, start=1):
+        mapping[f"{{{{HORAS_MODULO_{i}}}}}"] = str(h)
+
+
+    replace_placeholders(prs, mapping, font_overrides=font_overrides)
+    
+    return prs
+
+
+# -------------------------------------------------
+# ENDPOINTS
+# -------------------------------------------------
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.post("/api/diplomas")
+def generate_pptx_batch(payload: BatchRequest):
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="items no puede estar vacío")
+
+    try:
+        # 1. Generar presentaciones
+        presentations: List[Presentation] = []
+        for item in payload.items:
+            prs = generar_presentacion_por_item(item)
+            presentations.append(prs)
+
+        # 2. Merge
+        merged = merge_presentations(presentations)
+
+        # 3. Insertar QR DESPUÉS del merge
+        # (por ahora seguirá poniendo 1 QR, luego lo arreglamos)
+        for item in payload.items:
+            qr_url = build_qr_url(item.nombres, item.apellidos, item.temaDiplomado)
+            qr_image = generate_qr_image(qr_url)
+            insert_qr_at_placeholder(merged, qr_image)
+
+        # 4. Exportar
+        output = BytesIO()
+        merged.save(output)
+        output.seek(0)
+
+        filename = f"CERTIFICADOS_{int(datetime.now().timestamp())}.pptx"
+
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        )
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+---------------------------
+formulario.html (front) :
+
+
+<div class="container">
+  <!-- HEADER -->
+  <header class="header">
+    <h1>Generador de Certificados</h1>
+    <p>Complete los datos y genere uno o varios certificados en un solo archivo PPTX.</p>
+  </header>
+
+  <form [formGroup]="form" (ngSubmit)="onSubmit()" class="form">
+    <div formArrayName="modelos">
+      <div
+        class="modelo-card"
+        *ngFor="let modelo of modelos.controls; let i = index"
+        [formGroupName]="i"
+      >
+        <div class="modelo-header">
+          <h3>Modelo {{ i + 1 }}</h3>
+
+          <button
+            type="button"
+            class="btn-remove"
+            (click)="eliminarModelo(i)"
+            *ngIf="modelos.length > 1"
+          >
+            ✕
+          </button>
+        </div>
+
+        <!-- MODELO DE CERTIFICADO -->
+        <div class="field">
+          <label>Modelo de certificado</label>
+          <select formControlName="modeloCertificado">
+            <option value="" disabled>Seleccione una opción</option>
+            <option value="INSTITUTO">Instituto</option>
+            <option value="UNIVERSIDAD_2QRS">Universidad 2QRS</option>
+            <option value="UNIVERSIDAD_AZUL">Universidad Azul</option>
+            <option value="COLEGIO_ABOGADOS_CALLAO">Colegio de Abogados del Callao</option>
+            <option value="COLEGIO_DE_PROFESORES_DEL_PERU">Colegio de Profesores del Perú</option>
+          </select>
+        </div>
+
+        <!-- TIPO DE CERTIFICADO -->
+        <div class="field">
+          <label>Tipo de certificado</label>
+          <select formControlName="tipoModelo">
+            <option value="" disabled>Seleccione una opción</option>
+            <option value="DIPLOMADO">Diplomado</option>
+            <option value="PROGRAMA DE ESPECIALIZACIÓN">Programa de Especialización</option>
+            <option value="CURSO">Curso</option>
+            <option value="CURSO_DE_CAPACITACION">Curso de Capacitación</option>
+            <option value="CURSO_DE_ACTUALIZACION">Curso de Actualización</option>
+          </select>
+        </div>
+
+        <div class="grid">
+          <div class="field">
+            <label>Nombres</label>
+            <input type="text" formControlName="nombres" />
+          </div>
+
+          <div class="field">
+            <label>Apellidos</label>
+            <input type="text" formControlName="apellidos" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label>Tema</label>
+          <input type="text" formControlName="temaDiplomado" />
+        </div>
+
+        <div class="grid">
+          <div class="field">
+            <label>Fecha inicio</label>
+            <input type="date" formControlName="fechaInicio" />
+          </div>
+
+          <div class="field">
+            <label>Fecha fin</label>
+            <input type="date" formControlName="fechaFin" />
+          </div>
+        </div>
+
+        <div class="grid">
+          <div class="field">
+            <label>Horas académicas</label>
+            <input type="number" formControlName="horasAcademicas" />
+          </div>
+
+          <!-- <div class="field">
+            <label>Créditos académicos</label>
+            <input type="number" formControlName="creditosAcademicos" />
+          </div> -->
+          <div class="field">
+            <label>Créditos académicos</label>
+            <input type="number" formControlName="creditosAcademicos" />
+          </div>
+        </div>
+
+        <div class="grid">
+          <div class="field">
+            <label>Folio N°</label>
+            <input type="text" formControlName="folioNumero" />
+          </div>
+
+          <div class="field">
+            <label>Fecha de emisión</label>
+            <input type="date" formControlName="fechaEmision" />
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ACCIONES -->
+    <div class="actions">
+      <button
+        type="button"
+        class="btn-add"
+        (click)="agregarModelo()"
+        [disabled]="modelos.length >= MAX_MODELOS"
+      >
+        + Agregar modelo
+      </button>
+
+      <a
+        href="https://drive.google.com/file/d/1UBLykyA21zRTl-sqQzOj-y42hMMUhU_H/view"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="btn-folios"
+      >
+        N° de Folios
+      </a>
+
+      <!-- 🔥 BOTÓN LIMPIAR -->
+      <button type="button" class="btn-clear" (click)="limpiarFormulario()">Limpiar</button>
+
+      <button type="submit" class="btn-submit">Generar PPTX</button>
+    </div>
+  </form>
+  <!-- RESULTADO QR SLUGS -->
+  <div *ngIf="mostrarQrSlugs" class="qr-result">
+    <h3>Identificadores de códigos QR</h3>
+
+    <div class="qr-list">
+      <div class="qr-item" *ngFor="let slug of qrSlugs; let i = index">
+        <span class="qr-index">{{ i + 1 }}.</span>
+        <code>{{ slug }}</code>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+formulario.ts (front) :
+
+
+import { CommonModule } from '@angular/common';
+import { Component, Renderer2 } from '@angular/core';
+import { FormArray, FormBuilder, FormGroup, ReactiveFormsModule, Validators } from '@angular/forms';
+import { FormularioService } from '../../services/formularioService';
+
+interface ModeloFlags {
+  autoFechaEmision: boolean;
+  autoCreditos: boolean;
+}
+
+@Component({
+  selector: 'app-formulario',
+  imports: [CommonModule, ReactiveFormsModule],
+  templateUrl: './formulario.html',
+  styleUrl: './formulario.css',
+})
+export class Formulario {
+  readonly MAX_MODELOS = 12;
+  modeloFlags: ModeloFlags[] = [];
+
+  form: FormGroup;
+
+  qrSlugs: string[] = [];
+  mostrarQrSlugs = false;
+
+  private normalizarTexto(texto: string): string {
+    return texto
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '') // quitar tildes
+      .replace(/[^a-zA-Z0-9]/g, '') // quitar espacios y símbolos
+      .toLowerCase();
+  }
+
+  private generarSlugQR(nombres: string, apellidos: string, tema: string): string {
+    const primerNombre = nombres.trim().split(' ')[0] || '';
+    const primerApellido = apellidos.trim().split(' ')[0] || '';
+
+    return (
+      this.normalizarTexto(primerNombre) +
+      this.normalizarTexto(primerApellido) +
+      this.normalizarTexto(tema)
+    );
+  }
+
+  private MODELO_COLOR_MAP: Record<string, string> = {
+    INSTITUTO: '#3b3a40',
+    UNIVERSIDAD_2QRS: '#D14900',
+    UNIVERSIDAD_AZUL: '#004B57',
+    COLEGIO_ABOGADOS_CALLAO: '#0e8914', 
+    COLEGIO_DE_PROFESORES_DEL_PERU: '#00af9e'
+  };
+
+  private HORAS_A_MESES: Record<number, number> = {
+    40: 1,
+    50: 1,
+    60: 1,
+    70: 1,
+    80: 1,
+    100: 1,
+    120: 1,
+    130: 2,
+    140: 2,
+    150: 2,
+    160: 2,
+    170: 2,
+    180: 2,
+    190: 2,
+    200: 2,
+    210: 2,
+    220: 2,
+    230: 2,
+    240: 2,
+    250: 2,
+    260: 3,
+    270: 3,
+    280: 3,
+    290: 3,
+    300: 3,
+    310: 3,
+    320: 3,
+    330: 3,
+    340: 3,
+    350: 3,
+    360: 3,
+    370: 4,
+    380: 4,
+    390: 4,
+    400: 4,
+    410: 4,
+    420: 4,
+    430: 4,
+    440: 4,
+    450: 4,
+    460: 4,
+    470: 4,
+    480: 5,
+    490: 5,
+    500: 5,
+    510: 5,
+    520: 5,
+    530: 5,
+    540: 5,
+    550: 5,
+    560: 5,
+    570: 6,
+    580: 6,
+    590: 6,
+    600: 6,
+    610: 6,
+    620: 6,
+    630: 6,
+    640: 6,
+    650: 6,
+    660: 6,
+    670: 6,
+    680: 7,
+    690: 7,
+    700: 7,
+    710: 7,
+    720: 7,
+    730: 7,
+    740: 7,
+    750: 7,
+    760: 7,
+    770: 7,
+    780: 8,
+    790: 8,
+    800: 8,
+    810: 8,
+    820: 8,
+    830: 8,
+    840: 8,
+    850: 8,
+    860: 8,
+    870: 9,
+    880: 9,
+    890: 9,
+    900: 9,
+    910: 9,
+    920: 9,
+    930: 9,
+    940: 9,
+    950: 9,
+    960: 9,
+    970: 10,
+    980: 10,
+    990: 10,
+    1000: 10,
+    1010: 10,
+    1020: 10,
+    1030: 10,
+    1040: 10,
+    1050: 10,
+    1060: 10,
+    1070: 10,
+    1080: 11,
+    1090: 11,
+    1100: 11,
+    1110: 11,
+    1120: 11,
+    1130: 11,
+    1140: 11,
+    1150: 12,
+    1160: 12,
+    1170: 12,
+    1180: 12,
+    1190: 12,
+    1200: 12,
+    1210: 12,
+    1220: 12,
+    1230: 12,
+    1240: 12,
+    1250: 12,
+  };
+
+  constructor(
+    private fb: FormBuilder,
+    private service: FormularioService,
+    private renderer: Renderer2,
+  ) {
+    this.form = this.fb.group({
+      modelos: this.fb.array([]),
+    });
+
+    this.modelos.push(this.crearModeloForm(0));
+
+    this.renderer.setStyle(document.body, 'background-color', '#f3f4f6');
+    this.renderer.setStyle(document.body, 'transition', 'background-color 0.4s ease');
+  }
+
+  get modelos(): FormArray {
+    return this.form.get('modelos') as FormArray;
+  }
+
+  private actualizarColorFondo(): void {
+    const primerModelo = this.modelos.at(0) as FormGroup;
+    const tipo = primerModelo.get('modeloCertificado')?.value;
+
+    const color = this.MODELO_COLOR_MAP[tipo] || '#f3f4f6';
+    this.renderer.setStyle(document.body, 'background-color', color);
+  }
+
+  private propagarModeloCertificado(valor: string, origenIndex: number): void {
+    this.modelos.controls.forEach((ctrl, i) => {
+      if (i === origenIndex) return;
+
+      const modeloCtrl = (ctrl as FormGroup).get('modeloCertificado');
+      if (modeloCtrl && modeloCtrl.value !== valor) {
+        modeloCtrl.setValue(valor, { emitEvent: false });
+      }
+    });
+
+    // 🔥 actualizar color de fondo una sola vez
+    this.actualizarColorFondo();
+  }
+
+  private calcularFechaInicio(modelo: FormGroup): void {
+    const fechaFinValue = modelo.get('fechaFin')?.value;
+    const horas = modelo.get('horasAcademicas')?.value;
+
+    if (!fechaFinValue || !horas) return;
+
+    const meses = this.HORAS_A_MESES[horas];
+    if (!meses) return;
+
+    const fechaFin = new Date(fechaFinValue);
+    const fechaBase = new Date(
+      fechaFin.getFullYear(),
+      fechaFin.getMonth() - meses,
+      fechaFin.getDate(),
+    );
+
+    let fechaInicio = new Date(fechaBase);
+    while (fechaInicio.getDay() !== 1) {
+      fechaInicio.setDate(fechaInicio.getDate() - 1);
+    }
+
+    const yyyy = fechaInicio.getFullYear();
+    const mm = String(fechaInicio.getMonth() + 1).padStart(2, '0');
+    const dd = String(fechaInicio.getDate()).padStart(2, '0');
+
+    modelo.get('fechaInicio')?.setValue(`${yyyy}-${mm}-${dd}`, {
+      emitEvent: false,
+    });
+  }
+
+  crearModeloForm(index: number, nombres: string = '', apellidos: string = ''): FormGroup {
+    this.modeloFlags[index] = {
+      autoFechaEmision: true,
+      autoCreditos: true,
+    };
+
+    const grupo = this.fb.group({
+      modeloCertificado: [
+        this.modelos.at(0)?.get('modeloCertificado')?.value || '',
+        Validators.required,
+      ],
+      tipoModelo: ['', Validators.required],
+
+      nombres: [nombres, [Validators.required, Validators.minLength(2)]],
+      apellidos: [apellidos, [Validators.required, Validators.minLength(2)]],
+
+      temaDiplomado: ['', [Validators.required, Validators.minLength(3)]],
+
+      fechaInicio: ['', Validators.required],
+      fechaFin: ['', Validators.required],
+
+      horasAcademicas: [null, [Validators.required, Validators.min(1)]],
+      creditosAcademicos: [0, [Validators.required, Validators.min(0)]],
+
+      folioNumero: ['', [Validators.required, Validators.minLength(3)]],
+      fechaEmision: ['', Validators.required],
+    });
+
+    // ---------- FECHA FIN → FECHA INICIO + EMISIÓN ----------
+    grupo.get('fechaFin')?.valueChanges.subscribe((fechaFin) => {
+      this.calcularFechaInicio(grupo);
+
+      const flags = this.modeloFlags[index];
+      const fechaEmisionCtrl = grupo.get('fechaEmision');
+
+      if (!flags || !fechaEmisionCtrl || !fechaFin) return;
+
+      // 🔁 AL CAMBIAR FECHA FIN, EL SISTEMA RECUPERA CONTROL
+      flags.autoFechaEmision = true;
+
+      fechaEmisionCtrl.setValue(fechaFin, { emitEvent: false });
+
+      // ✅ FORZAR ACTUALIZACIÓN INMEDIATA DEL FOLIO
+      actualizarFolio();
+    });
+
+    // ---------- FECHA EMISIÓN MANUAL ----------
+    grupo.get('fechaEmision')?.valueChanges.subscribe(() => {
+      const flags = this.modeloFlags[index];
+      if (flags) flags.autoFechaEmision = false;
+    });
+
+    // ---------- HORAS → CRÉDITOS ----------
+    grupo.get('horasAcademicas')?.valueChanges.subscribe((horas) => {
+      this.calcularFechaInicio(grupo);
+
+      const flags = this.modeloFlags[index];
+      const creditosCtrl = grupo.get('creditosAcademicos');
+      const horasNumber = Number(horas);
+
+      if (!creditosCtrl || !flags) return;
+
+      // 🔁 al cambiar horas, el sistema recupera control
+      flags.autoCreditos = true;
+
+      if (isNaN(horasNumber) || horasNumber <= 0) {
+        creditosCtrl.setValue(0, { emitEvent: false });
+        return;
+      }
+
+      const creditos = this.calcularCreditos(horasNumber);
+      creditosCtrl.setValue(creditos, { emitEvent: false });
+    });
+
+    // ---------- CRÉDITOS MANUAL ----------
+    grupo.get('creditosAcademicos')?.valueChanges.subscribe(() => {
+      const flags = this.modeloFlags[index];
+      if (flags) flags.autoCreditos = false;
+    });
+
+    grupo.get('modeloCertificado')?.valueChanges.subscribe((valor) => {
+      if (!valor) return;
+
+      // 1️⃣ Propagar a todos los certificados
+      this.propagarModeloCertificado(valor, index);
+
+      // 2️⃣ Recalcular folio (por si cambia Universidad Azul)
+      actualizarFolio();
+    });
+
+    const actualizarFolio = () => {
+      const nombres = grupo.get('nombres')?.value;
+      const apellidos = grupo.get('apellidos')?.value;
+      const fechaEmision = grupo.get('fechaEmision')?.value;
+      const modeloCertificado = grupo.get('modeloCertificado')?.value;
+
+      const folioCtrl = grupo.get('folioNumero');
+      if (!folioCtrl) return;
+
+      const folioActual = folioCtrl.value;
+
+      const nuevoFolio = this.generarFolio(
+        nombres,
+        apellidos,
+        fechaEmision,
+        modeloCertificado,
+        folioActual,
+      );
+
+      folioCtrl.setValue(nuevoFolio, { emitEvent: false });
+    };
+
+    grupo.get('nombres')?.valueChanges.subscribe(actualizarFolio);
+    grupo.get('apellidos')?.valueChanges.subscribe(actualizarFolio);
+    grupo.get('fechaEmision')?.valueChanges.subscribe(actualizarFolio);
+    grupo.get('modeloCertificado')?.valueChanges.subscribe(actualizarFolio);
+
+    return grupo;
+  }
+
+  agregarModelo(): void {
+    if (this.modelos.length >= this.MAX_MODELOS) {
+      alert(`Solo se permite un máximo de ${this.MAX_MODELOS} certificados.`);
+      return;
+    }
+
+    const index = this.modelos.length;
+    const primerModelo = this.modelos.at(0) as FormGroup;
+
+    const nombres = primerModelo.get('nombres')?.value || '';
+    const apellidos = primerModelo.get('apellidos')?.value || '';
+
+    this.modelos.push(this.crearModeloForm(index, nombres, apellidos));
+  }
+
+  eliminarModelo(index: number): void {
+    this.modeloFlags.splice(index, 1);
+
+    if (this.modelos.length > 1) {
+      this.modelos.removeAt(index);
+      this.actualizarColorFondo();
+    }
+  }
+
+  onSubmit(): void {
+    if (this.form.invalid) {
+      this.form.markAllAsTouched();
+      return;
+    }
+
+    // 🔥 Generar slugs QR en el frontend
+    this.qrSlugs = this.modelos.controls.map((grupo) => {
+      const g = grupo as FormGroup;
+      return this.generarSlugQR(
+        g.get('nombres')?.value,
+        g.get('apellidos')?.value,
+        g.get('temaDiplomado')?.value,
+      );
+    });
+
+    this.mostrarQrSlugs = true;
+
+    const payload = { items: this.modelos.value };
+
+    this.service.generarPPTX(payload).subscribe({
+      next: (archivo: Blob) => this.descargarArchivo(archivo),
+      error: (err) => {
+        console.error('ERROR BACKEND:', err);
+        alert('Error al generar el PPTX. Revisa la consola.');
+      },
+    });
+  }
+
+  private descargarArchivo(blob: Blob): void {
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `CERTIFICADOS_${Date.now()}.pptx`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(url);
+  }
+
+  limpiarFormulario(): void {
+    this.modeloFlags = [];
+
+    this.modelos.clear();
+    this.modelos.push(this.crearModeloForm(0));
+
+    this.form.reset();
+
+    this.qrSlugs = [];
+    this.mostrarQrSlugs = false;
+
+    this.renderer.setStyle(document.body, 'background-color', '#f3f4f6');
+  }
+
+  private calcularCreditos(horas: number): number {
+    if (!horas || horas <= 0) return 0;
+
+    // División exacta entre 16
+    return Math.round((horas / 16) * 100) / 100; // 2 decimales
+  }
+
+  private generarFolio(
+    nombres?: string | null,
+    apellidos?: string | null,
+    fechaEmision?: string | null,
+    modeloCertificado?: string | null,
+    folioActual?: string | null,
+  ): string {
+    if (!fechaEmision) return '';
+
+    const year = new Date(fechaEmision).getFullYear();
+
+    // 🟢 1. EXTRAER PREFIJO EXISTENTE (antes del primer " - ")
+    let prefijo = '';
+    if (folioActual && folioActual.includes(' - ')) {
+      prefijo = folioActual.split(' - ')[0];
+    }
+
+    // Si no hay prefijo, lo dejamos vacío
+    const base = prefijo ? `${prefijo} - ${year}` : ` - ${year}`;
+
+    // 🚫 Caso especial: Universidad Azul
+    if (modeloCertificado === 'UNIVERSIDAD_AZUL') {
+      return base;
+    }
+
+    // 🟢 2. CALCULAR INICIALES
+    const nombreSeguro = nombres ?? '';
+    const apellidosSeguro = apellidos ?? '';
+
+    const primerNombre = nombreSeguro.trim().charAt(0) || '';
+    const partesApellidos = apellidosSeguro.trim().split(/\s+/);
+    const primerApellido = partesApellidos[0]?.charAt(0) || '';
+    const segundoApellido = partesApellidos[1]?.charAt(0) || '';
+
+    const iniciales = (primerNombre + primerApellido + segundoApellido).toUpperCase();
+
+    return `${base} - ${iniciales}`;
+  }
+}
+
+
+formularioService.ts (front) :
+
+
+import { HttpClient } from '@angular/common/http';
+import { Injectable } from '@angular/core';
+import { Observable } from 'rxjs';
+
+@Injectable({
+  providedIn: 'root',
+})
+export class FormularioService {
+  // private readonly API_URL = 'https://ipdebackendcertificados-production.up.railway.app/api/diplomas';
+  private readonly API_URL = 'http://localhost:8000/api/diplomas';
+
+  constructor(private http: HttpClient) {}
+
+  /** Envía múltiples modelos y recibe un solo PPTX */
+  generarPPTX(payload: any): Observable<Blob> {
+    return this.http.post(this.API_URL, payload, {
+      responseType: 'blob',
+    });
+  }
+}
