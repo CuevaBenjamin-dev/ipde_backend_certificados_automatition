@@ -863,7 +863,7 @@ class DiplomaRequest(BaseModel):
     creditosAcademicos: int
     folioNumero: str
     fechaEmision: str
-
+    codigoEstudiante: str = ""
 
 class BatchRequest(BaseModel):
     items: List[DiplomaRequest]
@@ -1112,7 +1112,9 @@ def generar_presentacion_por_item(item: DiplomaRequest) -> Presentation:
         "{{FOLIO_NUMERO}}": item.folioNumero,
 
         "{{FECHA_EMISION_LARGA}}": fecha_emision_larga,
-        "{{FECHA_EMISION_CORTA}}": fecha_emision_corta,
+        "{{FECHA_EMISION_CORTA}}": fecha_emision_corta, 
+        
+        "{{CODE_STUDENT}}": (item.codigoEstudiante or "").strip(),
     }
 
     for i, m in enumerate(modulos, start=1):
@@ -1124,6 +1126,7 @@ def generar_presentacion_por_item(item: DiplomaRequest) -> Presentation:
 
 
     replace_placeholders(prs, mapping)
+
 
 # -------------------------------------------------
 # AJUSTE GENÉRICO (AZUL y 2QRS) - CERTIFICADO DE ESTUDIOS / PARTE DE ATRÁS
