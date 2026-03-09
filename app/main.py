@@ -25,6 +25,24 @@ import subprocess
 
 EXPORTS: dict[str, dict[str, tuple[bytes, str]]] = {}
 
+def get_public_base_url(request: Request) -> str:
+    """
+    Construye la URL pública correcta usando los headers del proxy de Railway.
+    Así evitamos que se generen links http:// cuando el frontend está en https://
+    """
+    forwarded_proto = request.headers.get("x-forwarded-proto", "")
+    forwarded_host = request.headers.get("x-forwarded-host", "")
+    host = request.headers.get("host", "")
+
+    proto = (forwarded_proto.split(",")[0].strip() if forwarded_proto else request.url.scheme)
+    final_host = (forwarded_host.split(",")[0].strip() if forwarded_host else host)
+
+    # fallback seguro
+    if not final_host:
+        return str(request.base_url).rstrip("/").replace("http://", "https://", 1)
+
+    return f"{proto}://{final_host}"
+
 
 # -------------------------------------------------
 # CONFIGURACIÓN GENERAL
@@ -1275,7 +1293,7 @@ def generate_pptx_batch(payload: BatchRequest, request: Request):
     EXPORTS[export_id] = files_to_store
 
     # 7) Construir URLs públicas de descarga
-    base_url = str(request.base_url).rstrip("/")
+    base_url = get_public_base_url(request)
     response_files = []
 
     for name in files_to_store.keys():
