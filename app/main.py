@@ -1,7 +1,9 @@
 from PIL.Image import item
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
+from uuid import uuid4
+from urllib.parse import quote
 from pydantic import BaseModel
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
@@ -15,13 +17,13 @@ from datetime import datetime
 from dotenv import load_dotenv
 from openai import OpenAI
 from copy import deepcopy
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 from pptx.util import Pt
 import qrcode
 import tempfile
-import zipfile
 import subprocess
-import shutil
+
+EXPORTS: dict[str, dict[str, tuple[bytes, str]]] = {}
 
 
 # -------------------------------------------------
@@ -886,6 +888,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc)}
+    )
+
 
 # -------------------------------------------------
 # DTO
@@ -1195,13 +1204,12 @@ def generar_presentacion_por_item(item: DiplomaRequest) -> Presentation:
 def health():
     return {"status": "ok"}
 
-## otro cambio
 @app.post("/api/diplomas")
-def generate_pptx_batch(payload: BatchRequest):
+def generate_pptx_batch(payload: BatchRequest, request: Request):
     if not payload.items:
         raise HTTPException(status_code=400, detail="items no puede estar vacío")
 
-    # 1) Generar presentaciones por item (sin QR)
+    # 1) Generar presentaciones por item
     presentations: List[Presentation] = []
     for item in payload.items:
         prs = generar_presentacion_por_item(item)
@@ -1210,63 +1218,88 @@ def generate_pptx_batch(payload: BatchRequest):
     # 2) Merge PPTX
     merged = merge_presentations(presentations)
 
-    # 3) Insertar QR en el merged (como ya lo haces)
-    #    (recomendación: que el QR apunte EXACTO a slug.pdf)
+    # 3) Insertar QR en el merged (SE DEJA TAL CUAL)
     for item in payload.items:
-        # Si el front ya manda el slug, úsalo para URL (consistencia total)
         slug = (item.qrSlug or "").strip()
         if slug:
             qr_url = f"https://especializacionvirtual.com/certificados/{slug}.pdf"
         else:
-            # fallback: tu lógica anterior
             qr_url = build_qr_url(item.nombres, item.apellidos, item.temaDiplomado)
 
         qr_image = generate_qr_image(qr_url)
         insert_qr_at_placeholder(merged, qr_image)
 
-    # 4) Guardar merged PPTX a bytes
+    # 4) Guardar PPTX final a bytes
     merged_buf = BytesIO()
     merged.save(merged_buf)
     merged_pptx_bytes = merged_buf.getvalue()
 
-    # 5) Generar PDFs por cada item (usando el PPTX individual, NO el merged)
-    #    Así cada pdf corresponde a su "modelo" / item.
-    pdf_files: list[tuple[str, bytes]] = []  # (filename, bytes)
+    # 5) Generar PDFs por cada item
+    pdf_files: list[tuple[str, bytes]] = []
 
     for i, (prs_item, item) in enumerate(zip(presentations, payload.items), start=1):
-        # guardar pptx individual a bytes
         b = BytesIO()
         prs_item.save(b)
         pptx_bytes = b.getvalue()
 
-        # convertir a pdf
         pdf_bytes = convert_pptx_to_pdf_bytes(pptx_bytes)
 
-        # nombre del pdf = slug del front
         slug = (item.qrSlug or "").strip()
         if not slug:
-            # fallback: generarlo aquí si no vino
-            slug = normalize_text_for_url(item.nombres.split()[0]) + \
-                   normalize_text_for_url(item.apellidos.split()[0]) + \
-                   normalize_text_for_url(item.temaDiplomado)
+            slug = (
+                normalize_text_for_url(item.nombres.split()[0])
+                + normalize_text_for_url(item.apellidos.split()[0])
+                + normalize_text_for_url(item.temaDiplomado)
+            )
 
         pdf_name = safe_filename(slug) + ".pdf"
         pdf_files.append((pdf_name, pdf_bytes))
 
-    # 6) Empaquetar todo en ZIP (pptx + pdfs)
-    zip_buf = BytesIO()
-    with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
-        zip_pptx_name = f"CERTIFICADOS_{int(datetime.now().timestamp())}.pptx"
-        z.writestr(zip_pptx_name, merged_pptx_bytes)
+    # 6) Guardar temporalmente archivos en memoria
+    export_id = uuid4().hex
+    files_to_store: dict[str, tuple[bytes, str]] = {}
 
-        for name, content in pdf_files:
-            z.writestr(name, content)
+    pptx_name = f"CERTIFICADOS_{int(datetime.now().timestamp())}.pptx"
+    files_to_store[pptx_name] = (
+        merged_pptx_bytes,
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    )
 
-    zip_buf.seek(0)
+    for name, content in pdf_files:
+        files_to_store[name] = (content, "application/pdf")
 
-    zip_name = f"EXPORT_{int(datetime.now().timestamp())}.zip"
+    EXPORTS[export_id] = files_to_store
+
+    # 7) Construir URLs públicas de descarga
+    base_url = str(request.base_url).rstrip("/")
+    response_files = []
+
+    for name in files_to_store.keys():
+        response_files.append({
+            "name": name,
+            "url": f"{base_url}/api/diplomas/download/{export_id}/{quote(name)}",
+        })
+
+    # 8) Devolver JSON con los archivos a descargar
+    return {
+        "exportId": export_id,
+        "files": response_files,
+    }
+
+@app.get("/api/diplomas/download/{export_id}/{filename:path}")
+def download_generated_file(export_id: str, filename: str):
+    export = EXPORTS.get(export_id)
+    if not export:
+        raise HTTPException(status_code=404, detail="Exportación no encontrada")
+
+    file_data = export.get(filename)
+    if not file_data:
+        raise HTTPException(status_code=404, detail="Archivo no encontrado")
+
+    content, media_type = file_data
+
     return StreamingResponse(
-        zip_buf,
-        media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{zip_name}"'}
+        BytesIO(content),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
