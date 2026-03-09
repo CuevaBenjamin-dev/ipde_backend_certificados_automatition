@@ -15,9 +15,13 @@ from datetime import datetime
 from dotenv import load_dotenv
 from openai import OpenAI
 from copy import deepcopy
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from pptx.util import Pt
 import qrcode
+import tempfile
+import zipfile
+import subprocess
+import shutil
 
 
 # -------------------------------------------------
@@ -331,6 +335,42 @@ def distribuir_horas_por_modulo(total_horas: int, cantidad_modulos: int) -> List
             i = cantidad_modulos - 1
 
     return horas
+
+
+## otro cambio
+def convert_pptx_to_pdf_bytes(pptx_bytes: bytes) -> bytes:
+    """
+    Convierte PPTX a PDF usando LibreOffice (soffice) en modo headless.
+    Requiere que 'soffice' exista en el sistema.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        pptx_path = os.path.join(tmp, "input.pptx")
+        pdf_path = os.path.join(tmp, "input.pdf")
+
+        with open(pptx_path, "wb") as f:
+            f.write(pptx_bytes)
+
+        # LibreOffice crea el PDF con el mismo nombre base en el outdir
+        cmd = [
+            "soffice",
+            "--headless",
+            "--nologo",
+            "--nofirststartwizard",
+            "--convert-to", "pdf",
+            "--outdir", tmp,
+            pptx_path,
+        ]
+
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode != 0 or not os.path.exists(pdf_path):
+            raise RuntimeError(
+                "Error convirtiendo PPTX a PDF.\n"
+                f"STDOUT: {result.stdout.decode(errors='ignore')}\n"
+                f"STDERR: {result.stderr.decode(errors='ignore')}"
+            )
+
+        with open(pdf_path, "rb") as f:
+            return f.read()
 
 
 
@@ -851,6 +891,7 @@ app.add_middleware(
 # DTO
 # -------------------------------------------------
 
+## otro cambio
 class DiplomaRequest(BaseModel):
     modeloCertificado: str
     tipoModelo: str
@@ -864,6 +905,7 @@ class DiplomaRequest(BaseModel):
     folioNumero: str
     fechaEmision: str
     codigoEstudiante: str = ""
+    qrSlug: str = ""
 
 class BatchRequest(BaseModel):
     items: List[DiplomaRequest]
@@ -1153,40 +1195,78 @@ def generar_presentacion_por_item(item: DiplomaRequest) -> Presentation:
 def health():
     return {"status": "ok"}
 
-
+## otro cambio
 @app.post("/api/diplomas")
 def generate_pptx_batch(payload: BatchRequest):
     if not payload.items:
         raise HTTPException(status_code=400, detail="items no puede estar vacío")
 
-    # 1. Generar presentaciones SIN QR
+    # 1) Generar presentaciones por item (sin QR)
     presentations: List[Presentation] = []
     for item in payload.items:
         prs = generar_presentacion_por_item(item)
         presentations.append(prs)
 
-    # 2. Merge
+    # 2) Merge PPTX
     merged = merge_presentations(presentations)
 
-    # 3. Insertar QR DESPUÉS del merge (clave)
-    for slide, item in zip(merged.slides, payload.items):
-        qr_url = build_qr_url(
-            item.nombres,
-            item.apellidos,
-            item.temaDiplomado
-        )
+    # 3) Insertar QR en el merged (como ya lo haces)
+    #    (recomendación: que el QR apunte EXACTO a slug.pdf)
+    for item in payload.items:
+        # Si el front ya manda el slug, úsalo para URL (consistencia total)
+        slug = (item.qrSlug or "").strip()
+        if slug:
+            qr_url = f"https://especializacionvirtual.com/certificados/{slug}.pdf"
+        else:
+            # fallback: tu lógica anterior
+            qr_url = build_qr_url(item.nombres, item.apellidos, item.temaDiplomado)
+
         qr_image = generate_qr_image(qr_url)
         insert_qr_at_placeholder(merged, qr_image)
 
-    # 4. Exportar
-    output = BytesIO()
-    merged.save(output)
-    output.seek(0)
+    # 4) Guardar merged PPTX a bytes
+    merged_buf = BytesIO()
+    merged.save(merged_buf)
+    merged_pptx_bytes = merged_buf.getvalue()
 
-    filename = f"CERTIFICADOS_{int(datetime.now().timestamp())}.pptx"
+    # 5) Generar PDFs por cada item (usando el PPTX individual, NO el merged)
+    #    Así cada pdf corresponde a su "modelo" / item.
+    pdf_files: list[tuple[str, bytes]] = []  # (filename, bytes)
 
+    for i, (prs_item, item) in enumerate(zip(presentations, payload.items), start=1):
+        # guardar pptx individual a bytes
+        b = BytesIO()
+        prs_item.save(b)
+        pptx_bytes = b.getvalue()
+
+        # convertir a pdf
+        pdf_bytes = convert_pptx_to_pdf_bytes(pptx_bytes)
+
+        # nombre del pdf = slug del front
+        slug = (item.qrSlug or "").strip()
+        if not slug:
+            # fallback: generarlo aquí si no vino
+            slug = normalize_text_for_url(item.nombres.split()[0]) + \
+                   normalize_text_for_url(item.apellidos.split()[0]) + \
+                   normalize_text_for_url(item.temaDiplomado)
+
+        pdf_name = safe_filename(slug) + ".pdf"
+        pdf_files.append((pdf_name, pdf_bytes))
+
+    # 6) Empaquetar todo en ZIP (pptx + pdfs)
+    zip_buf = BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        zip_pptx_name = f"CERTIFICADOS_{int(datetime.now().timestamp())}.pptx"
+        z.writestr(zip_pptx_name, merged_pptx_bytes)
+
+        for name, content in pdf_files:
+            z.writestr(name, content)
+
+    zip_buf.seek(0)
+
+    zip_name = f"EXPORT_{int(datetime.now().timestamp())}.zip"
     return StreamingResponse(
-        output,
-        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        zip_buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{zip_name}"'}
     )
